@@ -36,25 +36,65 @@ enum Commands {
     },
 }
 
-fn main() -> Result<(), anyhow::Error> {
-    let cli = Cli::parse();
-
-    fn write_input_data<T, U>(
-        input: &[T],
-        writer: &Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>,
-    ) where
-        T: Sample,
-        U: Sample + hound::Sample + FromSample<T>,
-    {
-        if let Ok(mut guard) = writer.try_lock() {
-            if let Some(writer) = guard.as_mut() {
-                for &sample in input.iter() {
-                    let sample: U = U::from_sample(sample);
-                    writer.write_sample(sample).ok();
-                }
+fn write_input_data<T, U>(
+    input: &[T],
+    writer: &Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>,
+) where
+    T: Sample,
+    U: Sample + hound::Sample + FromSample<T>,
+{
+    if let Ok(mut guard) = writer.try_lock() {
+        if let Some(writer) = guard.as_mut() {
+            for &sample in input.iter() {
+                let sample: U = U::from_sample(sample);
+                writer.write_sample(sample).ok();
             }
         }
     }
+}
+
+fn initialize_stream(device: cpal::Device, writer: Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>, config: cpal::SupportedStreamConfig) -> Result<cpal::Stream, anyhow::Error> {
+
+    let err_fn = move |err| {
+        eprintln!("an error occurred on stream: {}", err);
+    };
+
+    match config.sample_format() {
+        cpal::SampleFormat::I8 => Ok(device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| write_input_data::<i8, i8>(data, &writer),
+            err_fn,
+            None,
+        )?),
+        cpal::SampleFormat::I16 => Ok(device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| write_input_data::<i16, i16>(data, &writer),
+            err_fn,
+            None,
+        )?),
+        cpal::SampleFormat::I32 => Ok(device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| write_input_data::<i32, i32>(data, &writer),
+            err_fn,
+            None,
+        )?),
+        cpal::SampleFormat::F32 => Ok(device.build_input_stream(
+            &config.into(),
+            move |data, _: &_| write_input_data::<f32, f32>(data, &writer),
+            err_fn,
+            None,
+        )?),
+        sample_format => {
+            Err(anyhow::Error::msg(format!(
+                "Unsupported sample format '{sample_format}'"
+            )))
+        }
+    }
+}
+
+fn main() -> Result<(), anyhow::Error> {
+    let cli = Cli::parse();
+
 
     match &cli.command {
         Some(Commands::Device { list }) => {
@@ -104,43 +144,8 @@ fn main() -> Result<(), anyhow::Error> {
 
             let detatched_writer = writer.clone();
 
-            let err_fn = move |err| {
-                eprintln!("an error occurred on stream: {}", err);
-            };
-
-            let stream = match config.sample_format() {
-                cpal::SampleFormat::I8 => device.build_input_stream(
-                    &config.into(),
-                    move |data, _: &_| write_input_data::<i8, i8>(data, &detatched_writer),
-                    err_fn,
-                    None,
-                )?,
-                cpal::SampleFormat::I16 => device.build_input_stream(
-                    &config.into(),
-                    move |data, _: &_| write_input_data::<i16, i16>(data, &detatched_writer),
-                    err_fn,
-                    None,
-                )?,
-                cpal::SampleFormat::I32 => device.build_input_stream(
-                    &config.into(),
-                    move |data, _: &_| write_input_data::<i32, i32>(data, &detatched_writer),
-                    err_fn,
-                    None,
-                )?,
-                cpal::SampleFormat::F32 => device.build_input_stream(
-                    &config.into(),
-                    move |data, _: &_| write_input_data::<f32, f32>(data, &detatched_writer),
-                    err_fn,
-                    None,
-                )?,
-                sample_format => {
-                    return Err(anyhow::Error::msg(format!(
-                        "Unsupported sample format '{sample_format}'"
-                    )))
-                }
-            };
-
-            stream.play()?;
+            let stream = initialize_stream(device, detatched_writer, config);
+            stream.as_ref().unwrap().play()?;
 
             std::thread::sleep(std::time::Duration::from_secs(*duration));
             drop(stream);
