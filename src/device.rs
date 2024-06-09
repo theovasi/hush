@@ -19,7 +19,7 @@ pub fn list_input_devices(host_id: cpal::HostId) -> Vec<cpal::Device> {
     devices
 }
 
-pub fn get_device(index: Option<usize>, host_id: Option<cpal::HostId>) -> cpal::Device {
+pub fn get_input_device(index: Option<usize>, host_id: Option<cpal::HostId>) -> cpal::Device {
     match host_id {
         Some(id) => {
             let devices = list_input_devices(id);
@@ -36,22 +36,6 @@ pub fn get_device(index: Option<usize>, host_id: Option<cpal::HostId>) -> cpal::
                 None => cpal::default_host().default_input_device(),
             };
             device.unwrap()
-        }
-    }
-}
-
-pub fn default_input() -> Option<cpal::Device> {
-    let host = cpal::default_host();
-    println!("Recording on {:?}", host.id());
-
-    match host.default_input_device() {
-        Some(device) => Some(device),
-        None => {
-            println!(
-                "Failed to get default input device for host: {:?}",
-                host.id()
-            );
-            None
         }
     }
 }
