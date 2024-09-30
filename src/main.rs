@@ -1,11 +1,11 @@
-use clap::{Parser, Subcommand};
-use cpal::traits::{DeviceTrait, StreamTrait};
-use cpal::{FromSample, Sample};
-use std::fs::File;
-use std::io::BufWriter;
-use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
-use hush::sound_capture::device::{get_device, list_input_devices};
+use std::sync::{Arc, Mutex};
+use clap::{Parser, Subcommand}; use cpal::traits::{DeviceTrait, StreamTrait};
+
+use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
+
+use hush::device::{get_input_device, list_input_devices};
+use hush::utils::{Buffer, initialize_write_stream, initialize_buffered_stream};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -13,7 +13,6 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 }
-
 
 #[derive(Subcommand, Debug)]
 enum Commands {
@@ -25,7 +24,8 @@ enum Commands {
         #[arg(short, long)]
         list: bool,
     },
-    Record { #[arg(short, long)]
+    Record {
+        #[arg(short = 'd', long = "duration")]
         duration: u64,
 
         #[arg(short = 'i', long)]
@@ -34,62 +34,22 @@ enum Commands {
         #[arg(short, long, value_name = "OUTPUT_FILE")]
         output_file: PathBuf,
     },
-}
+    Transcribe {
+        #[arg(short = 'm', long = "model")]
+        model: PathBuf,
 
-fn write_input_data<T, U>(
-    input: &[T],
-    writer: &Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>,
-) where
-    T: Sample,
-    U: Sample + hound::Sample + FromSample<T>,
-{
-    if let Ok(mut guard) = writer.try_lock() {
-        if let Some(writer) = guard.as_mut() {
-            for &sample in input.iter() {
-                let sample: U = U::from_sample(sample);
-                writer.write_sample(sample).ok();
-            }
-        }
+        #[arg(short = 'i', long, value_name = "INPUT_FILE")]
+        input_file: PathBuf,
+
+    },
+    Live {
+        #[arg(short = 'i', long)]
+        device_index: Option<usize>,
+
+        #[arg(short = 'm', long = "model")]
+        model: PathBuf,
     }
-}
 
-fn initialize_stream(device: cpal::Device, writer: Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>, config: cpal::SupportedStreamConfig) -> Result<cpal::Stream, anyhow::Error> {
-
-    let err_fn = move |err| {
-        eprintln!("an error occurred on stream: {}", err);
-    };
-
-    match config.sample_format() {
-        cpal::SampleFormat::I8 => Ok(device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| write_input_data::<i8, i8>(data, &writer),
-            err_fn,
-            None,
-        )?),
-        cpal::SampleFormat::I16 => Ok(device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| write_input_data::<i16, i16>(data, &writer),
-            err_fn,
-            None,
-        )?),
-        cpal::SampleFormat::I32 => Ok(device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| write_input_data::<i32, i32>(data, &writer),
-            err_fn,
-            None,
-        )?),
-        cpal::SampleFormat::F32 => Ok(device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| write_input_data::<f32, f32>(data, &writer),
-            err_fn,
-            None,
-        )?),
-        sample_format => {
-            Err(anyhow::Error::msg(format!(
-                "Unsupported sample format '{sample_format}'"
-            )))
-        }
-    }
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -116,16 +76,17 @@ fn main() -> Result<(), anyhow::Error> {
         Some(Commands::Record { duration, device_index, output_file }) => {
             let device = match device_index {
                 Some(device_index) => {
-                    get_device(Some(*device_index), Some(cpal::default_host().id()))
+                    get_input_device(Some(*device_index), Some(cpal::default_host().id()))
                 }
-                None => get_device(None, None),
+                None => get_input_device(None, None),
             };
 
             println!("Recording using input device {:?}", &device.name());
 
-            let config: cpal::SupportedStreamConfig = device
-                .default_input_config()
-                .expect("Failed to get default input config");
+            let config: cpal::SupportedStreamConfig =
+                cpal::SupportedStreamConfig::new(1, cpal::SampleRate(16000),
+                                                cpal::SupportedBufferSize::Range { min: 256, max: 512 },
+                                                cpal::SampleFormat::F32);
 
             let wav_spec = hound::WavSpec {
                 channels: config.channels() as _,
@@ -144,7 +105,7 @@ fn main() -> Result<(), anyhow::Error> {
 
             let detatched_writer = writer.clone();
 
-            let stream = initialize_stream(device, detatched_writer, config);
+            let stream = initialize_write_stream(device, detatched_writer, config);
             stream.as_ref().unwrap().play()?;
 
             std::thread::sleep(std::time::Duration::from_secs(*duration));
@@ -154,6 +115,65 @@ fn main() -> Result<(), anyhow::Error> {
             println!("Recording {} complete.", path);
 
             Ok(())
+        },
+        Some(Commands::Transcribe { model, input_file }) => {
+            let model_path = model.as_os_str();
+            let context = WhisperContext::new_with_params(&model_path.to_str().unwrap(), WhisperContextParameters::default()).expect("Failed to load model.");
+
+            let mut state = context.create_state().expect("Failed to create state.");
+
+            let  reader = hound::WavReader::open(input_file)?;
+
+            println!("Input file contains {} samples.", reader.len());
+            let samples : Vec<f32> = reader.into_samples::<f32>()
+                .map(|s| s.unwrap() as f32)
+                .collect();
+
+            let chunk_size = 16000*10;
+            let mut chunks: Vec<Vec<f32>> = vec![vec![0.0; chunk_size]; samples.len() / chunk_size + 1];
+            for (i, sample) in samples.iter().enumerate() {
+                chunks[i / chunk_size][i % chunk_size] = *sample;
+            }
+                
+
+            println!("Using a buffer size of {} samples.", chunk_size);
+            for chunk in chunks {
+                let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+                state.full(params, &chunk[..]).expect("Failed to run model.");
+
+                let n_segments = state.full_n_segments().expect("Failed to get number of segments");
+
+                for i in 0..n_segments {
+                    println!("{}", state.full_get_segment_text(i).expect("Failed to get text."));
+                }
+            }
+
+            Ok(())
+        },
+
+        Some(Commands::Live { device_index, model }) => {
+            let device = match device_index {
+                Some(device_index) => {
+                    get_input_device(Some(*device_index), Some(cpal::default_host().id()))
+                }
+                None => get_input_device(None, None),
+            };
+
+            println!("Recording using input device {:?}", &device.name());
+
+            let config: cpal::SupportedStreamConfig =
+                cpal::SupportedStreamConfig::new(1, cpal::SampleRate(16000),
+                                                cpal::SupportedBufferSize::Range { min: 256, max: 512 },
+                                                cpal::SampleFormat::F32);
+
+            let buffer = Arc::new(Mutex::new(Buffer::new(model.to_path_buf(), 3 * 16000)));
+
+            let stream = initialize_buffered_stream(device, buffer, config);
+            stream.as_ref().unwrap().play()?;
+
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
         },
         None => {
             Ok(())
