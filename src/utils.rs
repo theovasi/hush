@@ -3,20 +3,50 @@ use std::io::BufWriter;
 use std::fs::File;
 use std::sync::{Arc, Mutex};
 
+use std::borrow::Borrow;
+use ouroboros::self_referencing;
 use cpal::{FromSample, Sample};
 use cpal::traits::DeviceTrait;
-use whisper_rs::{WhisperContext, WhisperContextParameters, FullParams, SamplingStrategy};
+use whisper_rs::{WhisperContext, WhisperState, WhisperContextParameters, FullParams, SamplingStrategy};
+
+
+#[self_referencing]
+pub struct ModelState {
+    pub whisper_context: WhisperContext,
+    #[borrows(whisper_context)]
+    #[covariant]
+    pub whisper_state: WhisperState<'this>,
+}
 
 pub struct Buffer {
-    model: PathBuf,
+    state: ModelState,
+    language: Option<String>,
     data: Vec<f32>,
     pos: usize,
 }
 
 impl Buffer {
-    pub fn new(model: PathBuf, size: usize) -> Buffer {
+    pub fn new(model: PathBuf, language: Option<String>, size: usize) -> Buffer {
+
+        let context = WhisperContext::new_with_params(
+            model.to_str().unwrap(),
+            WhisperContextParameters::default(),
+        )
+        .expect("Failed to load model.");
+
+        let model_state = ModelStateBuilder {
+            whisper_context: context,
+            whisper_state_builder: |whisper_context: &WhisperContext| {
+                whisper_context
+                    .create_state()
+                    .expect("Failed to create state.")
+            },
+        }
+        .build();
+
         Buffer {
-            model,
+            state: model_state,
+            language,
             data: vec![0.0; size],
             pos: 0,
         }
@@ -37,20 +67,26 @@ impl Buffer {
 
     pub fn transcribe(&mut self) {
 
-        let model_path = self.model.as_os_str();
-        let context = WhisperContext::new_with_params(&model_path.to_str().unwrap(), WhisperContextParameters::default()).expect("Failed to load model.");
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
-        let mut state = context.create_state().expect("Failed to create state.");
-
-        let params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        
-        state.full(params, &self.data[..]).expect("Failed to run model.");
-
-        let n_segments = state.full_n_segments().expect("Failed to get number of segments");
-
-        for i in 0..n_segments {
-            println!("{}", state.full_get_segment_text(i).expect("Failed to get text."));
+        if let Some(lang) = &self.language {
+            params.set_language(Some(lang));
+            params.set_translate(true);
         }
+
+        self.state.with_whisper_state_mut(|whisper_state| {
+            whisper_state
+                .full(params, &self.data[..])
+                .expect("Failed to run model.");
+
+            let n_segments = whisper_state.full_n_segments().expect("Failed to get number of segments");
+
+            for i in 0..n_segments {
+                println!("{}", whisper_state.full_get_segment_text(i).expect("Failed to get text."));
+            }
+        });
+
+
         self.data = vec![0.0; self.data.len()];
     }
 }
