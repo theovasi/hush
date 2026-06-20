@@ -1,21 +1,20 @@
-use std::path::PathBuf;
-use std::io::BufWriter;
 use std::fs::File;
+use std::io::BufWriter;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use std::borrow::Borrow;
-use ouroboros::self_referencing;
-use cpal::{FromSample, Sample};
 use cpal::traits::DeviceTrait;
-use whisper_rs::{WhisperContext, WhisperState, WhisperContextParameters, FullParams, SamplingStrategy};
-
+use cpal::{FromSample, Sample};
+use ouroboros::self_referencing;
+use whisper_rs::{
+    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
+};
 
 #[self_referencing]
 pub struct ModelState {
-    pub whisper_context: WhisperContext,
+    whisper_context: WhisperContext,
     #[borrows(whisper_context)]
-    #[covariant]
-    pub whisper_state: WhisperState<'this>,
+    pub whisper_state: WhisperState,
 }
 
 pub struct Buffer {
@@ -27,7 +26,6 @@ pub struct Buffer {
 
 impl Buffer {
     pub fn new(model: PathBuf, language: Option<String>, size: usize) -> Buffer {
-
         let context = WhisperContext::new_with_params(
             model.to_str().unwrap(),
             WhisperContextParameters::default(),
@@ -52,21 +50,17 @@ impl Buffer {
         }
     }
 
-    pub fn push(
-        & mut self,
-        input: f32,
-    ) {
+    pub fn push(&mut self, input: f32) {
         self.data[self.pos] = input;
         self.pos = self.pos + 1;
 
-        if self.pos == self.data.len()-1 {
+        if self.pos == self.data.len() - 1 {
             self.pos = 0;
             self.transcribe();
         }
     }
 
     pub fn transcribe(&mut self) {
-
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
 
         if let Some(lang) = &self.language {
@@ -79,13 +73,14 @@ impl Buffer {
                 .full(params, &self.data[..])
                 .expect("Failed to run model.");
 
-            let n_segments = whisper_state.full_n_segments().expect("Failed to get number of segments");
+            let n_segments = whisper_state.full_n_segments();
 
             for i in 0..n_segments {
-                println!("{}", whisper_state.full_get_segment_text(i).expect("Failed to get text."));
+                if let Some(segment) = whisper_state.get_segment(i) {
+                    println!("{}", segment.to_str().unwrap_or(""));
+                }
             }
         });
-
 
         self.data = vec![0.0; self.data.len()];
     }
@@ -108,25 +103,34 @@ pub fn write_input_data<T, U>(
     }
 }
 
-pub fn initialize_buffered_stream(device: cpal::Device, buffer: Arc<Mutex<Buffer>>, config: cpal::SupportedStreamConfig) -> Result<cpal::Stream, anyhow::Error> {
-
+pub fn initialize_buffered_stream(
+    device: cpal::Device,
+    buffer: Arc<Mutex<Buffer>>,
+    config: cpal::SupportedStreamConfig,
+) -> Result<cpal::Stream, anyhow::Error> {
     let err_fn = move |err| {
         eprintln!("an error occurred on stream: {}", err);
     };
 
-    Ok(device.build_input_stream(&config.into(), move |data, _: &_| {
-        for &sample in data.iter() {
-            if let Ok(mut guard) = buffer.try_lock() {
-                guard.push(sample);
+    Ok(device.build_input_stream(
+        &config.into(),
+        move |data, _: &_| {
+            for &sample in data.iter() {
+                if let Ok(mut guard) = buffer.try_lock() {
+                    guard.push(sample);
+                }
             }
-        }
-    }, err_fn, None)?)
-
+        },
+        err_fn,
+        None,
+    )?)
 }
 
-
-pub fn initialize_write_stream(device: cpal::Device, writer: Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>, config: cpal::SupportedStreamConfig) -> Result<cpal::Stream, anyhow::Error> {
-
+pub fn initialize_write_stream(
+    device: cpal::Device,
+    writer: Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>,
+    config: cpal::SupportedStreamConfig,
+) -> Result<cpal::Stream, anyhow::Error> {
     let err_fn = move |err| {
         eprintln!("an error occurred on stream: {}", err);
     };
@@ -156,11 +160,8 @@ pub fn initialize_write_stream(device: cpal::Device, writer: Arc<Mutex<Option<ho
             err_fn,
             None,
         )?),
-        sample_format => {
-            Err(anyhow::Error::msg(format!(
-                "Unsupported sample format '{sample_format}'"
-            )))
-        }
+        sample_format => Err(anyhow::Error::msg(format!(
+            "Unsupported sample format '{sample_format}'"
+        ))),
     }
 }
-
