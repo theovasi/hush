@@ -3,12 +3,8 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use whisper_rs::{
-    FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
-};
-
 use hush::device::{get_input_device, list_input_devices};
-use hush::utils::{initialize_buffered_stream, initialize_write_stream, Buffer, ModelState};
+use hush::utils::{initialize_buffered_stream, initialize_write_stream, Buffer};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -55,7 +51,6 @@ enum Commands {
         language: String,
     },
 }
-
 
 fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
@@ -136,10 +131,7 @@ fn main() -> Result<(), anyhow::Error> {
             let mut buffer = Buffer::new(model.to_path_buf(), None, 3 * 16000);
 
             println!("Input file contains {} samples.", reader.len());
-            let samples: Vec<f32> = reader
-                .into_samples::<f32>()
-                .map(|s| s.unwrap())
-                .collect();
+            let samples: Vec<f32> = reader.into_samples::<f32>().map(|s| s.unwrap()).collect();
 
             for sample in samples {
                 buffer.push(sample)
@@ -169,7 +161,11 @@ fn main() -> Result<(), anyhow::Error> {
                 cpal::SampleFormat::F32,
             );
 
-            let buffer = Arc::new(Mutex::new(Buffer::new(model.to_path_buf(), Some(language.to_string()), 3 * 16000)));
+            let buffer = Arc::new(Mutex::new(Buffer::new(
+                model.to_path_buf(),
+                Some(language.to_string()),
+                3 * 16000,
+            )));
 
             let stream = initialize_buffered_stream(device, buffer, config);
             stream.as_ref().unwrap().play()?;
