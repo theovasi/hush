@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use cpal::traits::DeviceTrait;
 use cpal::{FromSample, Sample};
+use env_logger;
 use ouroboros::self_referencing;
 use whisper_rs::{
     FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters, WhisperState,
@@ -26,6 +27,9 @@ pub struct Buffer {
 
 impl Buffer {
     pub fn new(model: PathBuf, language: Option<String>, size: usize) -> Buffer {
+        env_logger::init();
+        whisper_rs::install_logging_hooks();
+
         let context = WhisperContext::new_with_params(
             model.to_str().unwrap(),
             WhisperContextParameters::default(),
