@@ -12,4 +12,4 @@ cpal = "0.15.2"
 env_logger = "0.11.11"
 hound = "3.5.0"
 ouroboros = "0.18.4"
-whisper-rs = {version="0.16.0", features=["log_backend"]}
+whisper-rs = {version="0.16.0", features=["log_backend", "vulkan"]}
